@@ -427,7 +427,15 @@ with TelegramClient(getSession(), api_id, api_hash,
         if event.to_id != peerChannel:
             return
 
-        print(event)
+        # 打印收到的消息
+        msg_text = (event.message.message or event.message.text or "").strip()
+        has_media = bool(event.media)
+        media_type = "document" if hasattr(event.media, 'document') else ("photo" if hasattr(event.media, 'photo') else ("media" if has_media else "text"))
+        print("[收到消息] id={} type={} content={}".format(
+            event.message.id,
+            media_type,
+            repr(msg_text[:80]) if msg_text else "(无文字)"
+        ))
         
         try:
 
