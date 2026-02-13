@@ -572,10 +572,12 @@ with TelegramClient(getSession(), api_id, api_hash,
                 )
 
                 temp_path = path.join(tempFolder, filename + "." + TELEGRAM_DAEMON_TEMP_SUFFIX)
-                download_callback = lambda r, t: set_progress(filename, reply_message, r, t)
+
+                def download_callback(r, t):
+                    asyncio.create_task(set_progress(filename, reply_message, r, t))
 
                 await client.download_media(msg, temp_path, progress_callback=download_callback)
-                set_progress(filename, reply_message, 100, 100)
+                await set_progress(filename, reply_message, 100, 100)
                 
                 dest_path = path.join(downloadFolder, filename)
                 move(temp_path, dest_path)
