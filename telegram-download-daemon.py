@@ -131,6 +131,7 @@ os.makedirs(tempFolder, exist_ok=True)
 recordFilePath = TELEGRAM_DAEMON_RECORD_FILE or path.join(downloadFolder, "downloaded_records.txt")
 failedFilePath = path.join(downloadFolder, "failed.txt")
 deletedFilePath = path.join(downloadFolder, "deleted.txt")
+messageFilePath = path.join(downloadFolder, "message.txt")
    
 # Edit these lines:
 proxy = None
@@ -415,8 +416,17 @@ with TelegramClient(getSession(), api_id, api_hash,
     record_lock = asyncio.Lock()
 
     async def fetch_channel_media_and_delete_no_media():
-        """启动时：1) 删除无 media 的消息 2) 获取所有有 media 的消息，过滤已下载的，按倒序加入队列"""
+        """启动时：1) 导出所有消息到 message.txt 2) 删除无 media 的消息 3) 获取有 media 的消息加入队列"""
         entity = await client.get_entity(peerChannel)
+        
+        # 0. 导出所有消息到 message.txt
+        print("Exporting all messages to message.txt...")
+        with open(messageFilePath, 'w', encoding='utf-8') as f:
+            async for msg in client.iter_messages(entity):
+                msg_content = (getattr(msg, 'message', None) or getattr(msg, 'text', '') or '').replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
+                has_media = "media" if msg.media else "text"
+                f.write("{}\t{}\t{}\n".format(msg.id, has_media, msg_content))
+        print("Done exporting messages to message.txt")
         
         # 1. 删除无 media 的消息，并记录到 deleted.txt
         if not skip_delete_no_media:
