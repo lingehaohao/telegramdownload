@@ -441,10 +441,14 @@ with TelegramClient(getSession(), api_id, api_hash,
         
         # 2. 获取所有有 media 的消息，过滤已下载，倒序加入队列（最新先下载）
         print("Fetching media messages from channel...")
+        total_messages = 0
+        total_media = 0
         count = 0
         async for msg in client.iter_messages(entity):
+            total_messages += 1
             if not (hasattr(msg.media, 'document') or hasattr(msg.media, 'photo')):
                 continue
+            total_media += 1
             if is_media_pdf(msg):
                 continue
             msg_id = str(msg.id)
@@ -455,7 +459,8 @@ with TelegramClient(getSession(), api_id, api_hash,
                 continue
             await queue.put_back((msg, None))
             count += 1
-        print("Added {} media messages to queue (newest first)".format(count))
+        print("Channel: {} total messages, {} media (doc/photo), {} added to queue".format(
+            total_messages, total_media, count))
 
     @client.on(events.NewMessage())
     async def handler(event):
