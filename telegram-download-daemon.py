@@ -130,6 +130,7 @@ os.makedirs(tempFolder, exist_ok=True)
 # 记录文件路径
 recordFilePath = TELEGRAM_DAEMON_RECORD_FILE or path.join(downloadFolder, "downloaded_records.txt")
 failedFilePath = path.join(downloadFolder, "failed.txt")
+deletedFilePath = path.join(downloadFolder, "deleted.txt")
    
 # Edit these lines:
 proxy = None
@@ -417,24 +418,33 @@ with TelegramClient(getSession(), api_id, api_hash,
         """启动时：1) 删除无 media 的消息 2) 获取所有有 media 的消息，过滤已下载的，按倒序加入队列"""
         entity = await client.get_entity(peerChannel)
         
-        # 1. 删除无 media 的消息
+        # 1. 删除无 media 的消息，并记录到 deleted.txt
         if not skip_delete_no_media:
             print("Fetching messages to delete those without media...")
-            to_delete = []
+            to_delete = []  # [(msg_id, msg_content), ...]
             async for msg in client.iter_messages(entity):
                 if not msg.media:
-                    to_delete.append(msg.id)
+                    msg_content = (getattr(msg, 'message', None) or getattr(msg, 'text', '') or '').replace('\t', ' ').replace('\n', ' ')
+                    to_delete.append((msg.id, msg_content))
                 if len(to_delete) >= 100:  # 每批最多 100 条
                     try:
-                        await client.delete_messages(entity, to_delete)
-                        print("Deleted {} messages without media".format(len(to_delete)))
+                        msg_ids = [m[0] for m in to_delete]
+                        await client.delete_messages(entity, msg_ids)
+                        with open(deletedFilePath, 'a', encoding='utf-8') as f:
+                            for mid, content in to_delete:
+                                f.write("{}\t{}\n".format(mid, content))
+                        print("Deleted {} messages without media (recorded in deleted.txt)".format(len(to_delete)))
                     except Exception as e:
                         print("Error deleting messages:", e)
                     to_delete = []
             if to_delete:
                 try:
-                    await client.delete_messages(entity, to_delete)
-                    print("Deleted {} messages without media".format(len(to_delete)))
+                    msg_ids = [m[0] for m in to_delete]
+                    await client.delete_messages(entity, msg_ids)
+                    with open(deletedFilePath, 'a', encoding='utf-8') as f:
+                        for mid, content in to_delete:
+                            f.write("{}\t{}\n".format(mid, content))
+                    print("Deleted {} messages without media (recorded in deleted.txt)".format(len(to_delete)))
                 except Exception as e:
                     print("Error deleting messages:", e)
             print("Done deleting messages without media.")
