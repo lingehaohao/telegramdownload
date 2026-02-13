@@ -167,8 +167,9 @@ class MediaQueue:
 
 
 def load_downloaded_records():
-    """加载已下载记录，返回 set of (message_id, file_media_id) 用于过滤"""
+    """加载已下载记录，返回 (set of (message_id, file_media_id), set of file_media_id) 用于过滤"""
     records = set()
+    media_ids = set()
     if path.isfile(recordFilePath):
         try:
             with open(recordFilePath, 'r', encoding='utf-8') as f:
@@ -178,10 +179,11 @@ def load_downloaded_records():
                         continue
                     parts = line.split('\t')
                     if len(parts) >= 3:
-                        records.add((parts[1], parts[2]))  # message_id, file_media_id
+                        records.add((parts[1], parts[2]))
+                        media_ids.add(parts[2])  # 按文件去重：同一 document.id 只下载一次
         except Exception as e:
             print("Warning: Failed to load records:", e)
-    return records
+    return records, media_ids
 
 
 def save_downloaded_record(message_content, message_id, file_media_id, file_content_hash=""):
@@ -290,8 +292,36 @@ def get_file_hash_from_message(msg):
     return None
 
 
+def is_media_pdf(msg):
+    """判断是否为 PDF 文件（不下载）"""
+    if not hasattr(msg, 'media') or not msg.media:
+        return False
+    if hasattr(msg.media, 'document'):
+        mime = getattr(msg.media.document, 'mime_type', '') or ''
+        if mime == 'application/pdf':
+            return True
+        for attr in getattr(msg.media.document, 'attributes', []):
+            if isinstance(attr, DocumentAttributeFilename):
+                return attr.file_name.lower().endswith('.pdf')
+    return False
+
+
+def get_message_folder_name(msg, max_len=20):
+    """获取消息对应的文件夹名：取消息内容前 max_len 字符，过长则截断。同一条消息（含 album）用相同文件夹。"""
+    content = get_message_content(msg)
+    content_clean = "".join(c for c in content if c.isalnum() or c in "()._- ") if content else ""
+    if content_clean:
+        folder_base = content_clean[:max_len]
+    else:
+        folder_base = "msg"
+    folder_name = "".join(c for c in folder_base if c.isalnum() or c in "()._- ") or "msg"
+    # 同一 album 的多个 media 用 grouped_id，否则用 message_id
+    group_id = getattr(msg, 'grouped_id', None) or msg.id
+    return "{}_{}".format(folder_name, group_id)
+
+
 def get_filename_from_message(msg, fallback="unknown"):
-    """从 Message 生成文件名：优先使用消息内容，否则用 document 文件名或 id"""
+    """从 Message 生成文件名：优先使用消息内容，否则用 document 文件名或 id。避免重复添加扩展名。"""
     content = get_message_content(msg)
     content_clean = "".join(c for c in content if c.isalnum() or c in "()._- ") if content else ""
     
@@ -323,6 +353,10 @@ def get_filename_from_message(msg, fallback="unknown"):
     if not content_clean:
         content_clean = fallback
     
+    # 若 content_clean 已有扩展名，不再追加（避免 myfile.pdf -> myfile.pdf.pdf）
+    base_part, existing_ext = os.path.splitext(content_clean)
+    if existing_ext and len(existing_ext) <= 5:  # 常见扩展名长度
+        return content_clean
     return content_clean + ext
 
 
@@ -376,7 +410,7 @@ with TelegramClient(getSession(), api_id, api_hash,
 
     queue = MediaQueue()
     peerChannel = PeerChannel(channel_id)
-    downloaded_records = load_downloaded_records()
+    downloaded_records, downloaded_media_ids = load_downloaded_records()
     record_lock = asyncio.Lock()
 
     async def fetch_channel_media_and_delete_no_media():
@@ -411,11 +445,13 @@ with TelegramClient(getSession(), api_id, api_hash,
         async for msg in client.iter_messages(entity):
             if not (hasattr(msg.media, 'document') or hasattr(msg.media, 'photo')):
                 continue
+            if is_media_pdf(msg):
+                continue
             msg_id = str(msg.id)
             file_hash = get_file_hash_from_message(msg)
             if not file_hash:
                 continue
-            if (msg_id, file_hash) in downloaded_records:
+            if (msg_id, file_hash) in downloaded_records or file_hash in downloaded_media_ids:
                 continue
             await queue.put_back((msg, None))
             count += 1
@@ -446,8 +482,16 @@ with TelegramClient(getSession(), api_id, api_hash,
 
                 if command == "list":
                     try:
-                        files = listdir(downloadFolder)
-                        output = "\n".join(files) if files else "Directory is empty"
+                        items = listdir(downloadFolder)
+                        lines = []
+                        for item in sorted(items):
+                            full = path.join(downloadFolder, item)
+                            if path.isdir(full):
+                                sub = listdir(full)
+                                lines.append("{}/ ({})".format(item, len(sub)))
+                            else:
+                                lines.append(item)
+                        output = "\n".join(lines) if lines else "Directory is empty"
                     except Exception as e:
                         output = str(e)
                 elif command == "status":
@@ -531,13 +575,16 @@ with TelegramClient(getSession(), api_id, api_hash,
 
             if event.media:
                 if hasattr(event.media, 'document') or hasattr(event.media,'photo'):
-                    msg_id = str(event.message.id)
-                    file_hash = get_file_hash_from_message(event.message)
-                    if file_hash and (msg_id, file_hash) in downloaded_records:
-                        await event.reply("Already downloaded (in records). Ignoring.")
+                    if is_media_pdf(event.message):
+                        await event.reply("PDF skipped (not downloading).")
                     else:
-                        reply_msg = await event.reply("Added to queue (front)")
-                        await queue.put_front((event.message, reply_msg))
+                        msg_id = str(event.message.id)
+                        file_hash = get_file_hash_from_message(event.message)
+                        if file_hash and ((msg_id, file_hash) in downloaded_records or file_hash in downloaded_media_ids):
+                            await event.reply("Already downloaded (in records). Ignoring.")
+                        else:
+                            reply_msg = await event.reply("Added to queue (front)")
+                            await queue.put_front((event.message, reply_msg))
                 else:
                     await event.reply("That is not downloadable. Try to send it as a file.")
 
@@ -551,6 +598,19 @@ with TelegramClient(getSession(), api_id, api_hash,
                 msg = element[0]
                 reply_message = element[1]
 
+                # 再次检查：同一文件可能被不同消息加入队列（启动时与实时消息重叠）
+                media_id = get_file_hash_from_message(msg)
+                if media_id and media_id in downloaded_media_ids:
+                    queue.task_done()
+                    continue
+                if is_media_pdf(msg):
+                    queue.task_done()
+                    continue
+
+                folder_name = get_message_folder_name(msg)
+                msg_dest_dir = path.join(downloadFolder, folder_name)
+                os.makedirs(msg_dest_dir, exist_ok=True)
+
                 filename = get_filename_from_message(msg)
                 fileName, fileExtension = os.path.splitext(filename)
                 if not fileExtension and hasattr(msg.media, 'document'):
@@ -562,7 +622,8 @@ with TelegramClient(getSession(), api_id, api_hash,
                 tempfilename = fileName + "-" + getRandomId(8) + fileExtension
                 tempfilename = "".join(c for c in tempfilename if c.isalnum() or c in "()._- ")
 
-                if path.exists(path.join(tempFolder, tempfilename + "." + TELEGRAM_DAEMON_TEMP_SUFFIX)) or path.exists(path.join(downloadFolder, filename)):
+                dest_file_path = path.join(msg_dest_dir, filename)
+                if path.exists(path.join(tempFolder, tempfilename + "." + TELEGRAM_DAEMON_TEMP_SUFFIX)) or path.exists(dest_file_path):
                     if duplicates == "rename":
                         filename = tempfilename
                     elif duplicates == "ignore":
@@ -587,7 +648,7 @@ with TelegramClient(getSession(), api_id, api_hash,
                 await client.download_media(msg, temp_path, progress_callback=download_callback)
                 await set_progress(filename, reply_message, 100, 100)
                 
-                dest_path = path.join(downloadFolder, filename)
+                dest_path = path.join(msg_dest_dir, filename)
                 move(temp_path, dest_path)
                 
                 # 计算文件内容 hash (sha256)
@@ -605,6 +666,7 @@ with TelegramClient(getSession(), api_id, api_hash,
                 async with record_lock:
                     save_downloaded_record(msg_content, msg_id, media_id, file_content_hash)
                     downloaded_records.add((msg_id, media_id))
+                    downloaded_media_ids.add(media_id)
                 
                 await log_reply(reply_message, "{0} ready".format(filename))
 
